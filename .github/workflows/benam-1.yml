@@ -1,1 +1,22 @@
+name: Build benam
 
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: 'Job ID from Bot'
+        required: true
+      userId:
+        description: 'User ID'
+        required: true
+      payload:
+        description: 'Build Payload (JSON)'
+        required: true
+
+jobs:
+  build:
+    uses: lombenam/benam-1/.github/workflows/benam.yml@main
+    with:
+      jobId: ${{ inputs.jobId }}
+      userId: ${{ inputs.userId }}
+      payload: ${{ inputs.payload }}

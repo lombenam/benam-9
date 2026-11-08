@@ -1,0 +1,287 @@
+name: Setup benam
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag release environment (e.g. build-env-v1)'
+        required: true
+        default: 'build-env-v1'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK Extras (NDK + Platforms + Build Tools)
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            --sdk_root=$ANDROID_HOME \
+            "ndk;27.0.12077973" \
+            "ndk;28.2.13676358" \
+            "build-tools;35.0.0" \
+            "platforms;android-35" \
+            "platforms;android-36" 2>&1 | tail -5 || true
+
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            --sdk_root=$ANDROID_HOME \
+            "platforms;android-37" 2>&1 | tail -3 || true
+
+          if [ ! -d "$ANDROID_HOME/platforms/android-37" ]; then
+            for VARIANT in "android-37.0" "android-37.1" "android-37.2-beta1" "android-37.2"; do
+              if [ -d "$ANDROID_HOME/platforms/$VARIANT" ]; then
+                cp -r "$ANDROID_HOME/platforms/$VARIANT" "$ANDROID_HOME/platforms/android-37"
+                sed -i 's|<api-level>[0-9.]*</api-level>|<api-level>37</api-level>|g' \
+                  "$ANDROID_HOME/platforms/android-37/package.xml" || true
+                sed -i 's|<codename>[^<]*</codename>|<codename></codename>|g' \
+                  "$ANDROID_HOME/platforms/android-37/package.xml" || true
+                sed -i -E 's/path="platforms;android-37[^"]*"/path="platforms;android-37"/g' \
+                  "$ANDROID_HOME/platforms/android-37/package.xml" || true
+                echo "android-37 dibuat dari $VARIANT"
+                break
+              fi
+            done
+          fi
+
+          echo "=== SDK Platforms ==="
+          ls "$ANDROID_HOME/platforms/" 2>/dev/null
+          echo "=== NDK ==="
+          ls "$ANDROID_HOME/ndk/" 2>/dev/null | head -5
+
+          echo "Compressing android-sdk-platforms..."
+          tar -czf /tmp/android-sdk-platforms.tar.gz \
+            -C /usr/local/lib/android/sdk \
+            platforms/android-35 \
+            platforms/android-36 \
+            platforms/android-37 \
+            build-tools/35.0.0 \
+            2>/dev/null || true
+          echo "android-sdk-platforms.tar.gz: $(du -sh /tmp/android-sdk-platforms.tar.gz | cut -f1)"
+
+          echo "Compressing android-ndk-27..."
+          tar -czf /tmp/android-ndk-27.tar.gz \
+            -C /usr/local/lib/android/sdk/ndk \
+            27.0.12077973 \
+            2>/dev/null || echo "NDK 27 tidak ditemukan, skip"
+          [ -f /tmp/android-ndk-27.tar.gz ] && \
+            echo "android-ndk-27.tar.gz: $(du -sh /tmp/android-ndk-27.tar.gz | cut -f1)"
+
+          echo "Compressing android-ndk-28..."
+          tar -czf /tmp/android-ndk-28.tar.gz \
+            -C /usr/local/lib/android/sdk/ndk \
+            28.2.13676358 \
+            2>/dev/null || echo "NDK 28 tidak ditemukan, skip"
+          [ -f /tmp/android-ndk-28.tar.gz ] && \
+            echo "android-ndk-28.tar.gz: $(du -sh /tmp/android-ndk-28.tar.gz | cut -f1)"
+
+      - name: Setup Dart SDK (untuk FVM)
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install FVM dan Detect Cache Dir
+        run: |
+          dart pub global activate fvm
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+
+          FVM_CACHE_DIR=""
+          for CANDIDATE in \
+            "$HOME/.fvm/versions" \
+            "$HOME/fvm/versions" \
+            "/root/.fvm/versions" \
+            "/home/runner/.fvm/versions"; do
+            if [ -d "$CANDIDATE" ]; then
+              FVM_CACHE_DIR="$CANDIDATE"
+              break
+            fi
+          done
+
+          if [ -z "$FVM_CACHE_DIR" ]; then
+            FVM_CACHE_DIR="$HOME/.fvm/versions"
+            mkdir -p "$FVM_CACHE_DIR"
+          fi
+
+          echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+          echo "FVM cache dir: $FVM_CACHE_DIR"
+          fvm releases 2>/dev/null | tail -5 || true
+
+      - name: Install & Compress Flutter 3.24.5
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.24.5
+
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.24.5" ]; then
+            echo "Scan filesystem untuk FVM 3.24.5..."
+            FVM_PATH=$(find / -path "*/fvm/versions/3.24.5" -maxdepth 10 -type d 2>/dev/null | head -1)
+            if [ -n "$FVM_PATH" ]; then
+              FVM_CACHE_DIR=$(dirname "$FVM_PATH")
+              echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+              echo "FVM cache ditemukan di: $FVM_CACHE_DIR"
+            else
+              echo "ERROR: FVM 3.24.5 tidak ditemukan setelah install"
+              find / -name "flutter" -path "*/fvm/*" -maxdepth 12 2>/dev/null | head -10
+              exit 1
+            fi
+          fi
+
+          tar -czf /tmp/fvm-3.24.5.tar.gz -C "$FVM_CACHE_DIR" 3.24.5
+          echo "fvm-3.24.5.tar.gz: $(du -sh /tmp/fvm-3.24.5.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.24.5"
+      
+      - name: Install & Compress Flutter 3.32.0
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.32.0
+
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.32.0" ]; then
+            echo "Scan filesystem untuk FVM 3.32.0..."
+            FVM_PATH=$(find / -path "*/fvm/versions/3.32.0" -maxdepth 10 -type d 2>/dev/null | head -1)
+            if [ -n "$FVM_PATH" ]; then
+              FVM_CACHE_DIR=$(dirname "$FVM_PATH")
+              echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+              echo "FVM cache ditemukan di: $FVM_CACHE_DIR"
+            else
+              echo "ERROR: FVM 3.32.0 tidak ditemukan setelah install"
+              find / -name "flutter" -path "*/fvm/*" -maxdepth 12 2>/dev/null | head -10
+              exit 1
+            fi
+          fi
+
+          tar -czf /tmp/fvm-3.32.0.tar.gz -C "$FVM_CACHE_DIR" 3.32.0
+          echo "fvm-3.32.0.tar.gz: $(du -sh /tmp/fvm-3.32.0.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.32.0"
+
+      - name: Install & Compress Flutter 3.32.5
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.32.5
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.32.5" ]; then
+            FVM_PATH=$(find / -path "*/fvm/versions/3.32.5" -maxdepth 10 -type d 2>/dev/null | head -1)
+            [ -n "$FVM_PATH" ] && FVM_CACHE_DIR=$(dirname "$FVM_PATH") && echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+          fi
+          tar -czf /tmp/fvm-3.32.5.tar.gz -C "$FVM_CACHE_DIR" 3.32.5
+          echo "fvm-3.32.5.tar.gz: $(du -sh /tmp/fvm-3.32.5.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.32.5"
+
+      - name: Install & Compress Flutter 3.35.0
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.35.0
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.35.0" ]; then
+            FVM_PATH=$(find / -path "*/fvm/versions/3.35.0" -maxdepth 10 -type d 2>/dev/null | head -1)
+            [ -n "$FVM_PATH" ] && FVM_CACHE_DIR=$(dirname "$FVM_PATH") && echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+          fi
+          tar -czf /tmp/fvm-3.35.0.tar.gz -C "$FVM_CACHE_DIR" 3.35.0
+          echo "fvm-3.35.0.tar.gz: $(du -sh /tmp/fvm-3.35.0.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.35.0"
+
+      - name: Install & Compress Flutter 3.38.0
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.38.0
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.38.0" ]; then
+            FVM_PATH=$(find / -path "*/fvm/versions/3.38.0" -maxdepth 10 -type d 2>/dev/null | head -1)
+            [ -n "$FVM_PATH" ] && FVM_CACHE_DIR=$(dirname "$FVM_PATH") && echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+          fi
+          tar -czf /tmp/fvm-3.38.0.tar.gz -C "$FVM_CACHE_DIR" 3.38.0
+          echo "fvm-3.38.0.tar.gz: $(du -sh /tmp/fvm-3.38.0.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.38.0"
+
+      - name: Install & Compress Flutter 3.47.0
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.47.0
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.47.0" ]; then
+            FVM_PATH=$(find / -path "*/fvm/versions/3.47.0" -maxdepth 10 -type d 2>/dev/null | head -1)
+            [ -n "$FVM_PATH" ] && FVM_CACHE_DIR=$(dirname "$FVM_PATH") && echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+          fi
+          tar -czf /tmp/fvm-3.47.0.tar.gz -C "$FVM_CACHE_DIR" 3.47.0
+          echo "fvm-3.47.0.tar.gz: $(du -sh /tmp/fvm-3.47.0.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.47.0"
+
+      - name: Install & Compress Flutter 3.47.6
+        run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          fvm install 3.47.6
+          FVM_CACHE_DIR="${{ env.FVM_CACHE_DIR }}"
+          if [ ! -d "$FVM_CACHE_DIR/3.47.6" ]; then
+            FVM_PATH=$(find / -path "*/fvm/versions/3.47.6" -maxdepth 10 -type d 2>/dev/null | head -1)
+            [ -n "$FVM_PATH" ] && FVM_CACHE_DIR=$(dirname "$FVM_PATH") && echo "FVM_CACHE_DIR=$FVM_CACHE_DIR" >> $GITHUB_ENV
+          fi
+          tar -czf /tmp/fvm-3.47.6.tar.gz -C "$FVM_CACHE_DIR" 3.47.6
+          echo "fvm-3.47.6.tar.gz: $(du -sh /tmp/fvm-3.47.6.tar.gz | cut -f1)"
+          rm -rf "$FVM_CACHE_DIR/3.47.6"
+
+      - name: Summary ukuran semua asset
+        run: |
+          echo "=== Total asset yang akan diupload ==="
+          du -sh \
+            /tmp/android-sdk-platforms.tar.gz \
+            /tmp/android-ndk-27.tar.gz \
+            /tmp/android-ndk-28.tar.gz \
+            /tmp/fvm-3.24.5.tar.gz \
+            /tmp/fvm-3.32.0.tar.gz \
+            /tmp/fvm-3.32.5.tar.gz \
+            /tmp/fvm-3.35.0.tar.gz \
+            /tmp/fvm-3.38.0.tar.gz \
+            /tmp/fvm-3.47.0.tar.gz \
+            /tmp/fvm-3.47.6.tar.gz \
+            2>/dev/null
+          du -shc \
+            /tmp/android-sdk-platforms.tar.gz \
+            /tmp/android-ndk-27.tar.gz \
+            /tmp/android-ndk-28.tar.gz \
+            /tmp/fvm-*.tar.gz \
+            2>/dev/null | tail -1
+
+      - name: Publish ke GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag }}"
+
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push origin --delete "$TAG" 2>/dev/null || true
+
+          ASSETS=""
+          for f in \
+            /tmp/android-sdk-platforms.tar.gz \
+            /tmp/android-ndk-27.tar.gz \
+            /tmp/android-ndk-28.tar.gz \
+            /tmp/fvm-3.24.5.tar.gz \
+            /tmp/fvm-3.32.0.tar.gz \
+            /tmp/fvm-3.32.5.tar.gz \
+            /tmp/fvm-3.35.0.tar.gz \
+            /tmp/fvm-3.38.0.tar.gz \
+            /tmp/fvm-3.47.0.tar.gz \
+            /tmp/fvm-3.47.6.tar.gz; do
+            [ -f "$f" ] && ASSETS="$ASSETS $f"
+          done
+
+          gh release create "$TAG" \
+            --title "benam setup: $TAG" \
+            --notes "Pre-installed Flutter pool + Android SDK/NDK. Dibuat: $(date -u '+%Y-%m-%d %H:%M UTC')" \
+            --prerelease \
+            $ASSETS
+
+          echo "✅ Release $TAG berhasil"
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.name): \(.size / 1048576 | floor)MB"'

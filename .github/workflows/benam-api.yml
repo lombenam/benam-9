@@ -1,0 +1,44 @@
+name: benam api
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y make git zlib1g-dev libssl-dev gperf cmake g++ build-essential
+
+      - name: Clone telegram-bot-api Source
+        run: git clone --recursive https://github.com/tdlib/telegram-bot-api.git src
+
+      - name: Build Release Binary
+        run: |
+          mkdir -p src/build
+          cd src/build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          cmake --build . --target telegram-bot-api -- -j$(nproc)
+
+      - name: Package Binary
+        run: |
+          mkdir -p dist
+          cp src/build/telegram-bot-api dist/telegram-bot-api-linux-x64
+
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tgbotapi-binary
+          name: benam api
+          files: dist/telegram-bot-api-linux-x64
+          body: Prebuilt telegram-bot-api binary compiled from official tdlib source. Used by the bot to run a self-hosted Local Bot API without needing to compile on the target server.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
